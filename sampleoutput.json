@@ -1,0 +1,14 @@
+{
+  "experiment": "experiment_3_qat_rerank",
+  "metrics": {
+    "ndcg@10": 0.409,
+    "recall@50": 0.772,
+    "mean_latency_ms": 182.3,
+    "median_latency_ms": 168.9,
+    "p95_latency_ms": 310.0,
+    "mean_embedding_latency_ms": 11.8,
+    "p95_embedding_latency_ms": 22.0,
+    "mean_rerank_latency_ms": 104.1,
+    "p95_rerank_latency_ms": 185.0
+  }
+}
