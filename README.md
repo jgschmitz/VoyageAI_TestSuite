@@ -172,7 +172,7 @@ Each run produces:
 
 ## 📦 Requirements
 
-- Python 3.8+
+- Python 3.10+
 - MongoDB Atlas Vector Search
 - VoyageAI API key
 - Reranker model access (for experiments 2 & 3)
