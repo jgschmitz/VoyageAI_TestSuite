@@ -159,6 +159,17 @@ Each run produces:
 
 ---
 
+## 🧪 Results Summary
+
+| Experiment | Description | nDCG@10 | Recall@50 | P95 Total Latency | Notes |
+|-----------|-------------|---------|-----------|------------------|-------|
+| **Exp 1** | Best Voyage (Direct) | 0.378 | 0.785 | 145 ms | Strong baseline retriever |
+| **Exp 2** | Best Voyage + Reranker | **0.421** | **0.785** | 330 ms | Best overall quality |
+| **Exp 3** | QAT Voyage + Reranker | 0.409 | 0.772 | 310 ms | Near-best quality, cheaper embeds |
+| **Exp 4** | QAT Voyage (Direct) | 0.349 | 0.728 | **115 ms** | Fastest & cheapest |
+
+---
+
 ## 📦 Requirements
 
 - Python 3.8+
