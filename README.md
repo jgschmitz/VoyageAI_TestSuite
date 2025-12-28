@@ -1,6 +1,6 @@
 # 🚀 VoyageAI RAG Evaluation & Benchmarking Suite
 
-A practical, opinionated framework for **benchmarking embeddings, vector search, and reranking strategies** on MongoDB Atlas using **VoyageAI** models.
+A practical and fair framework for **benchmarking embeddings, vector search, and reranking strategies** on MongoDB Atlas using **VoyageAI** models.
 
 This repo is designed for engineers who want **real answers** to questions like:
 
