@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import json, os, time, yaml
 import numpy as np
 import voyageai
