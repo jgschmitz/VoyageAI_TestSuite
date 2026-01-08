@@ -4,7 +4,7 @@ A practical and fair framework for **benchmarking embeddings, vector search, and
 
 This repo is designed for engineers who want **real answers** to questions like:
 
-- *Do rerankers actually help my data?*
+- *will rerankers actually help my accuracy?*
 - *Is quantization “good enough” — or am I losing recall?*
 - *Where is my latency really going?*
 - *What should I ship to production?*
