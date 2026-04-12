@@ -1,256 +1,277 @@
-"""MongoDB Atlas Vector Search client for VoyageAI experiments."""
+"""MongoDB Atlas Vector Search client."""
 
-import time
-from typing import Dict, List, Optional, Tuple, Any
+from __future__ import annotations
+
 import logging
+import time
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
-try:
-    from pymongo import MongoClient
-    from pymongo.errors import ConnectionFailure, OperationFailure
-except ImportError:
-    raise ImportError("pymongo is required. Install with: pip install pymongo")
+from pymongo import MongoClient
+from pymongo.collection import Collection
+from pymongo.database import Database
+from pymongo.errors import ConnectionFailure, OperationFailure
 
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class AtlasConfig:
+    connection_string: str
+    database_name: str = "voyageai_test_suite"
+    collection_name: str = "documents"
+    max_pool_size: int = 50
+    min_pool_size: int = 5
+    timeout_ms: int = 30000
+    retry_writes: bool = True
+    retry_reads: bool = True
+    indexes: Dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class VectorFieldConfig:
+    doc_id: str
+    text: str
+    metadata: str
+    embedding_fields_by_index: Dict[str, str]
+
+
 class AtlasVectorSearchClient:
     """Client for MongoDB Atlas Vector Search operations."""
-    
+
     def __init__(self, config: Dict[str, Any]):
-        """Initialize the Atlas client.
-        
-        Args:
-            config: Atlas configuration dictionary from YAML config
-        """
-        self.config = config
-        self.atlas_config = config.get("atlas", {})
-        self.vector_config = config.get("vector_search", {})
-        
-        # Initialize MongoDB client
-        self.connection_string = self.atlas_config.get("connection_string")
-        if not self.connection_string or "YOUR_USERNAME" in self.connection_string:
-            raise ValueError(
-                "Please configure your Atlas connection string in atlas_config.yaml"
+        self.raw_config = config
+        self.atlas = self._parse_atlas_config(config)
+        self.fields = self._parse_vector_config(config)
+
+        self.client: Optional[MongoClient] = None
+        self.database: Optional[Database] = None
+        self.collection: Optional[Collection] = None
+
+        self.connect()
+
+    @staticmethod
+    def _parse_atlas_config(config: Dict[str, Any]) -> AtlasConfig:
+        atlas = config.get("atlas", {})
+        connection_string = atlas.get("connection_string")
+
+        if not connection_string or "YOUR_USERNAME" in connection_string:
+            raise ValueError("Please configure your Atlas connection string.")
+
+        return AtlasConfig(
+            connection_string=connection_string,
+            database_name=atlas.get("database_name", "voyageai_test_suite"),
+            collection_name=atlas.get("collection_name", "documents"),
+            max_pool_size=atlas.get("max_pool_size", 50),
+            min_pool_size=atlas.get("min_pool_size", 5),
+            timeout_ms=atlas.get("timeout_ms", 30000),
+            retry_writes=atlas.get("retry_writes", True),
+            retry_reads=atlas.get("retry_reads", True),
+            indexes=atlas.get("indexes", {}),
+        )
+
+    @staticmethod
+    def _parse_vector_config(config: Dict[str, Any]) -> VectorFieldConfig:
+        vector_config = config.get("vector_search", {})
+        fields = vector_config.get("fields", {})
+
+        doc_id = fields.get("doc_id")
+        text = fields.get("text")
+        metadata = fields.get("metadata")
+
+        if not all([doc_id, text, metadata]):
+            raise ValueError("Missing required vector_search.fields configuration.")
+
+        atlas_indexes = config.get("atlas", {}).get("indexes", {})
+        embedding_fields_by_index: Dict[str, str] = {}
+
+        best_index = atlas_indexes.get("best_model")
+        qat_index = atlas_indexes.get("qat_model")
+
+        if best_index:
+            embedding_fields_by_index[best_index] = fields.get(
+                "embedding_best", "embedding_best"
             )
-            
-        self.client = None
-        self.database = None
-        self.collection = None
-        self._connect()
-    
-    def _connect(self):
+        if qat_index:
+            embedding_fields_by_index[qat_index] = fields.get(
+                "embedding_qat", "embedding_qat"
+            )
+
+        return VectorFieldConfig(
+            doc_id=doc_id,
+            text=text,
+            metadata=metadata,
+            embedding_fields_by_index=embedding_fields_by_index,
+        )
+
+    def connect(self) -> None:
         """Establish connection to MongoDB Atlas."""
         try:
             self.client = MongoClient(
-                self.connection_string,
-                maxPoolSize=self.atlas_config.get("max_pool_size", 50),
-                minPoolSize=self.atlas_config.get("min_pool_size", 5),
-                serverSelectionTimeoutMS=self.atlas_config.get("timeout_ms", 30000),
-                retryWrites=self.atlas_config.get("retry_writes", True),
-                retryReads=self.atlas_config.get("retry_reads", True),
+                self.atlas.connection_string,
+                maxPoolSize=self.atlas.max_pool_size,
+                minPoolSize=self.atlas.min_pool_size,
+                serverSelectionTimeoutMS=self.atlas.timeout_ms,
+                retryWrites=self.atlas.retry_writes,
+                retryReads=self.atlas.retry_reads,
             )
-            
-            # Test connection
-            self.client.admin.command('ismaster')
-            
-            db_name = self.atlas_config.get("database_name", "voyageai_test_suite")
-            collection_name = self.atlas_config.get("collection_name", "documents")
-            
-            self.database = self.client[db_name]
-            self.collection = self.database[collection_name]
-            
-            logger.info(f"Connected to Atlas database: {db_name}.{collection_name}")
-            
-        except ConnectionFailure as e:
-            logger.error(f"Failed to connect to Atlas: {e}")
+
+            self.client.admin.command("ping")
+
+            self.database = self.client[self.atlas.database_name]
+            self.collection = self.database[self.atlas.collection_name]
+
+            logger.info(
+                "Connected to Atlas database: %s.%s",
+                self.atlas.database_name,
+                self.atlas.collection_name,
+            )
+        except ConnectionFailure:
+            logger.exception("Failed to connect to Atlas")
             raise
-    
+
+    def _require_collection(self) -> Collection:
+        if self.collection is None:
+            raise RuntimeError("MongoDB collection is not initialized.")
+        return self.collection
+
+    def _require_database(self) -> Database:
+        if self.database is None:
+            raise RuntimeError("MongoDB database is not initialized.")
+        return self.database
+
+    def _embedding_field_for_index(self, index_name: str) -> str:
+        try:
+            return self.fields.embedding_fields_by_index[index_name]
+        except KeyError as exc:
+            raise ValueError(f"Unknown index name: {index_name}") from exc
+
     def vector_search(
         self,
         query_vector: List[float],
         index_name: str,
         limit: int = 10,
         num_candidates: int = 200,
-        filter_dict: Optional[Dict] = None
-    ) -> Tuple[List[Dict], float]:
-        """Perform vector search using Atlas Vector Search.
-        
-        Args:
-            query_vector: The query embedding vector
-            index_name: Name of the vector search index to use
-            limit: Number of results to return
-            num_candidates: Number of candidates to consider
-            filter_dict: Optional metadata filter
-            
-        Returns:
-            Tuple of (search results, search latency in seconds)
-        """
-        start_time = time.time()
-        
-        try:
-            # Build vector search pipeline
-            vector_search_stage = {
-                "$vectorSearch": {
-                    "index": index_name,
-                    "path": self._get_embedding_field(index_name),
-                    "queryVector": query_vector,
-                    "numCandidates": num_candidates,
-                    "limit": limit
-                }
+        filter_dict: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[List[Dict[str, Any]], float]:
+        """Run Atlas vector search and return results plus latency."""
+        collection = self._require_collection()
+        start_time = time.perf_counter()
+
+        vector_search_stage: Dict[str, Any] = {
+            "$vectorSearch": {
+                "index": index_name,
+                "path": self._embedding_field_for_index(index_name),
+                "queryVector": query_vector,
+                "numCandidates": num_candidates,
+                "limit": limit,
             }
-            
-            # Add filter if provided
-            if filter_dict:
-                vector_search_stage["$vectorSearch"]["filter"] = filter_dict
-            
-            # Build aggregation pipeline
-            pipeline = [
-                vector_search_stage,
-                {
-                    "$addFields": {
-                        "score": {"$meta": "vectorSearchScore"}
-                    }
-                },
-                {
-                    "$project": {
-                        "_id": 0,
-                        "doc_id": f"${self.vector_config['fields']['doc_id']}",
-                        "text": f"${self.vector_config['fields']['text']}",
-                        "score": 1,
-                        "metadata": f"${self.vector_config['fields']['metadata']}"
-                    }
+        }
+
+        if filter_dict:
+            vector_search_stage["$vectorSearch"]["filter"] = filter_dict
+
+        pipeline = [
+            vector_search_stage,
+            {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
+            {
+                "$project": {
+                    "_id": 0,
+                    "doc_id": f"${self.fields.doc_id}",
+                    "text": f"${self.fields.text}",
+                    "score": 1,
+                    "metadata": f"${self.fields.metadata}",
                 }
-            ]
-            
-            # Execute search
-            results = list(self.collection.aggregate(pipeline))
-            search_latency = time.time() - start_time
-            
-            logger.debug(f"Vector search returned {len(results)} results in {search_latency:.3f}s")
-            
-            return results, search_latency
-            
-        except OperationFailure as e:
-            logger.error(f"Vector search failed: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"Unexpected error during vector search: {e}")
-            raise
-    
-    def _get_embedding_field(self, index_name: str) -> str:
-        """Get the embedding field name for a given index."""
-        indexes = self.atlas_config.get("indexes", {})
-        fields = self.vector_config.get("fields", {})
-        
-        if index_name == indexes.get("best_model"):
-            return fields.get("embedding_best", "embedding_best")
-        elif index_name == indexes.get("qat_model"):
-            return fields.get("embedding_qat", "embedding_qat")
-        else:
-            raise ValueError(f"Unknown index name: {index_name}")
-    
-    def get_document_by_id(self, doc_id: str) -> Optional[Dict]:
-        """Retrieve a document by its ID.
-        
-        Args:
-            doc_id: Document identifier
-            
-        Returns:
-            Document dictionary or None if not found
-        """
+            },
+        ]
+
         try:
-            doc_id_field = self.vector_config["fields"]["doc_id"]
-            result = self.collection.find_one(
-                {doc_id_field: doc_id},
-                {"_id": 0}  # Exclude MongoDB ObjectId
+            results = list(collection.aggregate(pipeline))
+            latency = time.perf_counter() - start_time
+            logger.debug(
+                "Vector search returned %s results in %.3fs",
+                len(results),
+                latency,
             )
-            return result
-        except Exception as e:
-            logger.error(f"Error retrieving document {doc_id}: {e}")
-            return None
-    
-    def get_documents_by_ids(self, doc_ids: List[str]) -> List[Dict]:
-        """Retrieve multiple documents by their IDs.
-        
-        Args:
-            doc_ids: List of document identifiers
-            
-        Returns:
-            List of document dictionaries
-        """
+            return results, latency
+        except OperationFailure:
+            logger.exception("Vector search failed")
+            raise
+
+    def get_document_by_id(self, doc_id: str) -> Optional[Dict[str, Any]]:
+        """Return a document by logical document id."""
+        collection = self._require_collection()
+
         try:
-            doc_id_field = self.vector_config["fields"]["doc_id"]
-            results = list(self.collection.find(
-                {doc_id_field: {"$in": doc_ids}},
-                {"_id": 0}  # Exclude MongoDB ObjectId
-            ))
-            
-            # Maintain order of input doc_ids
-            doc_map = {doc[doc_id_field]: doc for doc in results}
-            ordered_results = [doc_map.get(doc_id) for doc_id in doc_ids]
-            
-            # Filter out None values (missing documents)
-            return [doc for doc in ordered_results if doc is not None]
-            
-        except Exception as e:
-            logger.error(f"Error retrieving documents {doc_ids}: {e}")
-            return []
-    
+            return collection.find_one(
+                {self.fields.doc_id: doc_id},
+                {"_id": 0},
+            )
+        except Exception:
+            logger.exception("Error retrieving document %s", doc_id)
+            raise
+
+    def get_documents_by_ids(self, doc_ids: List[str]) -> List[Dict[str, Any]]:
+        """Return documents in the same order as the input ids."""
+        collection = self._require_collection()
+
+        try:
+            results = list(
+                collection.find(
+                    {self.fields.doc_id: {"$in": doc_ids}},
+                    {"_id": 0},
+                )
+            )
+            by_id = {doc[self.fields.doc_id]: doc for doc in results}
+            return [by_id[doc_id] for doc_id in doc_ids if doc_id in by_id]
+        except Exception:
+            logger.exception("Error retrieving documents")
+            raise
+
     def check_indexes(self) -> Dict[str, bool]:
-        """Check if required vector search indexes exist.
-        
-        Returns:
-            Dictionary with index names and their existence status
-        """
+        """Check whether configured Atlas search indexes exist."""
+        collection = self._require_collection()
+
         try:
-            # Get list of search indexes
-            indexes = list(self.collection.list_search_indexes())
-            index_names = [idx.get("name", "") for idx in indexes]
-            
-            required_indexes = self.atlas_config.get("indexes", {})
-            status = {}
-            
-            for index_key, index_name in required_indexes.items():
-                status[index_name] = index_name in index_names
-                
-            logger.info(f"Index status: {status}")
-            return status
-            
-        except Exception as e:
-            logger.error(f"Error checking indexes: {e}")
-            return {}
-    
+            existing = {
+                idx.get("name", "")
+                for idx in collection.list_search_indexes()
+            }
+            configured = self.atlas.indexes or {}
+            return {
+                index_name: index_name in existing
+                for index_name in configured.values()
+            }
+        except Exception:
+            logger.exception("Error checking indexes")
+            raise
+
     def get_collection_stats(self) -> Dict[str, Any]:
-        """Get collection statistics.
-        
-        Returns:
-            Dictionary with collection statistics
-        """
+        """Return basic collection statistics."""
+        database = self._require_database()
+        collection = self._require_collection()
+
         try:
-            stats = self.database.command("collStats", self.collection.name)
-            
+            stats = database.command("collStats", collection.name)
             return {
                 "document_count": stats.get("count", 0),
                 "size_bytes": stats.get("size", 0),
                 "average_object_size": stats.get("avgObjSize", 0),
                 "index_count": stats.get("nindexes", 0),
             }
-            
-        except Exception as e:
-            logger.error(f"Error getting collection stats: {e}")
-            return {}
-    
-    def close(self):
+        except Exception:
+            logger.exception("Error getting collection stats")
+            raise
+
+    def close(self) -> None:
         """Close the MongoDB connection."""
-        if self.client:
+        if self.client is not None:
             self.client.close()
             logger.info("Closed Atlas connection")
-    
-    def __enter__(self):
-        """Context manager entry."""
+
+    def __enter__(self) -> "AtlasVectorSearchClient":
         return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit."""
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.close()
