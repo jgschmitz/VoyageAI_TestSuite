@@ -2,13 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-chenRun_csv.py — Embedding-only vector search → CSV
+- Embedding-only vector search → CSV
 - Model: OpenAI GPT-5-4 (2048 dims)
 - Index: Atlas Vector Search on path=VECTOR_FIELD (2048-d vectors)
 - NO reranking. Top-10 per query from ANN by vectorSearchScore.
 - Assumes document vectors were built from: name|definition|specialization|classification
 - Writes voyage_eval_result.csv (no NaNs; blanks instead)
 - Set PRINT_SAMPLE_N > 0 to see a few rows per query
+- This runs against FindCare opensource NUCC dataset 
 """
 
 import math
