@@ -1,79 +1,83 @@
 """Evaluation metrics for retrieval experiments."""
 
 from __future__ import annotations
+
+import logging
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 import numpy as np
-import logging
 
 logger = logging.getLogger(__name__)
 
-
-Qrels = Mapping[str, Mapping[str, int]]                 # {qid: {doc_id: grade}}
-Results = Mapping[str, Sequence[Mapping[str, Any]]]     # {qid: [{"doc_id":..., ...}, ...]}
+Qrels = Mapping[str, Mapping[str, int]]             # {qid: {doc_id: grade}}
+Results = Mapping[str, Sequence[Mapping[str, Any]]] # {qid: [{"doc_id": ..., ...}, ...]}
 
 
 def _doc_ids(results: Sequence[Mapping[str, Any]]) -> List[str]:
-    return [r["doc_id"] for r in results if "doc_id" in r]
+    return [result["doc_id"] for result in results if "doc_id" in result]
 
 
-def _relevant_set(query_qrels: Mapping[str, int]) -> set[str]:
-    # IMPORTANT: only grades > 0 are relevant
+def _relevant_doc_ids(query_qrels: Mapping[str, int]) -> set[str]:
     return {doc_id for doc_id, grade in query_qrels.items() if grade > 0}
 
 
-def _dcg(grades: List[int]) -> float:
-    # grades are in rank order, already truncated to k
-    s = 0.0
-    for i, rel in enumerate(grades):
-        if rel > 0:
-            s += (2**rel - 1) / math.log2(i + 2)  # i is 0-indexed
-    return s
+def _dcg(grades: Sequence[int]) -> float:
+    score = 0.0
+    for rank_index, grade in enumerate(grades):
+        if grade > 0:
+            score += (2**grade - 1) / math.log2(rank_index + 2)
+    return score
 
 
-def _ndcg_at_k(query_qrels: Mapping[str, int], retrieved: List[str], k: int) -> float:
-    retrieved = retrieved[:k]
-    gains = [query_qrels.get(d, 0) for d in retrieved]
+def _ndcg_at_k(query_qrels: Mapping[str, int], retrieved_doc_ids: Sequence[str], k: int) -> float:
+    top_k = list(retrieved_doc_ids[:k])
+    gains = [query_qrels.get(doc_id, 0) for doc_id in top_k]
     dcg = _dcg(gains)
 
-    ideal = sorted([g for g in query_qrels.values() if g > 0], reverse=True)[:k]
-    idcg = _dcg(ideal)
-    return (dcg / idcg) if idcg > 0 else 0.0
+    ideal_gains = sorted((grade for grade in query_qrels.values() if grade > 0), reverse=True)[:k]
+    ideal_dcg = _dcg(ideal_gains)
+
+    return dcg / ideal_dcg if ideal_dcg > 0 else 0.0
 
 
-def _precision_at_k(rel: set[str], retrieved: List[str], k: int) -> float:
-    retrieved = retrieved[:k]
-    if not retrieved:
+def _precision_at_k(relevant_doc_ids: set[str], retrieved_doc_ids: Sequence[str], k: int) -> float:
+    top_k = list(retrieved_doc_ids[:k])
+    if not top_k:
         return 0.0
-    return sum(1 for d in retrieved if d in rel) / len(retrieved)
+    hits = sum(1 for doc_id in top_k if doc_id in relevant_doc_ids)
+    return hits / len(top_k)
 
 
-def _recall_at_k(rel: set[str], retrieved: List[str], k: int) -> float:
-    if not rel:
+def _recall_at_k(relevant_doc_ids: set[str], retrieved_doc_ids: Sequence[str], k: int) -> float:
+    if not relevant_doc_ids:
         return 0.0
-    retrieved = retrieved[:k]
-    return sum(1 for d in retrieved if d in rel) / len(rel)
+    top_k = list(retrieved_doc_ids[:k])
+    hits = sum(1 for doc_id in top_k if doc_id in relevant_doc_ids)
+    return hits / len(relevant_doc_ids)
 
 
-def _mrr(rel: set[str], retrieved: List[str]) -> float:
-    for i, d in enumerate(retrieved, start=1):
-        if d in rel:
-            return 1.0 / i
+def _mrr(relevant_doc_ids: set[str], retrieved_doc_ids: Sequence[str]) -> float:
+    for rank, doc_id in enumerate(retrieved_doc_ids, start=1):
+        if doc_id in relevant_doc_ids:
+            return 1.0 / rank
     return 0.0
 
 
-def _ap(rel: set[str], retrieved: List[str]) -> float:
-    if not rel:
+def _average_precision(relevant_doc_ids: set[str], retrieved_doc_ids: Sequence[str]) -> float:
+    if not relevant_doc_ids:
         return 0.0
-    hit = 0
-    s = 0.0
-    for i, d in enumerate(retrieved, start=1):
-        if d in rel:
-            hit += 1
-            s += hit / i
-    return s / len(rel)
+
+    hits = 0
+    precision_sum = 0.0
+
+    for rank, doc_id in enumerate(retrieved_doc_ids, start=1):
+        if doc_id in relevant_doc_ids:
+            hits += 1
+            precision_sum += hits / rank
+
+    return precision_sum / len(relevant_doc_ids)
 
 
 @dataclass(frozen=True)
@@ -97,7 +101,7 @@ class CoverageStats:
 
 
 class EvaluationMetrics:
-    """Compute retrieval metrics (macro-averaged across queries)."""
+    """Compute macro-averaged retrieval metrics across queries."""
 
     def calculate_all_metrics(
         self,
@@ -105,60 +109,104 @@ class EvaluationMetrics:
         results: Results,
         k_values: Optional[Sequence[int]] = None,
     ) -> Dict[str, float]:
-        k_values = list(k_values) if k_values is not None else [5, 10, 20, 50]
+        ks = list(k_values) if k_values is not None else [5, 10, 20, 50]
         metrics: Dict[str, float] = {}
 
-        for k in k_values:
-            metrics[f"precision@{k}"] = self._macro(qrels, results, lambda qq, rr: _precision_at_k(_relevant_set(qq), rr, k))
-            metrics[f"recall@{k}"] = self._macro(qrels, results, lambda qq, rr: _recall_at_k(_relevant_set(qq), rr, k))
-            metrics[f"ndcg@{k}"] = self._macro(qrels, results, lambda qq, rr: _ndcg_at_k(qq, rr, k))
+        for k in ks:
+            metrics[f"precision@{k}"] = self._macro_average(
+                qrels,
+                results,
+                lambda query_qrels, retrieved: _precision_at_k(
+                    _relevant_doc_ids(query_qrels), retrieved, k
+                ),
+            )
+            metrics[f"recall@{k}"] = self._macro_average(
+                qrels,
+                results,
+                lambda query_qrels, retrieved: _recall_at_k(
+                    _relevant_doc_ids(query_qrels), retrieved, k
+                ),
+            )
+            metrics[f"ndcg@{k}"] = self._macro_average(
+                qrels,
+                results,
+                lambda query_qrels, retrieved: _ndcg_at_k(query_qrels, retrieved, k),
+            )
 
-        metrics["mrr"] = self._macro(qrels, results, lambda qq, rr: _mrr(_relevant_set(qq), rr))
-        metrics["map"] = self._macro(qrels, results, lambda qq, rr: _ap(_relevant_set(qq), rr))
+        metrics["mrr"] = self._macro_average(
+            qrels,
+            results,
+            lambda query_qrels, retrieved: _mrr(_relevant_doc_ids(query_qrels), retrieved),
+        )
+        metrics["map"] = self._macro_average(
+            qrels,
+            results,
+            lambda query_qrels, retrieved: _average_precision(
+                _relevant_doc_ids(query_qrels), retrieved
+            ),
+        )
 
         metrics.update(self.calculate_coverage(qrels, results).as_dict())
         return metrics
 
     def calculate_coverage(self, qrels: Qrels, results: Results) -> CoverageStats:
         total_queries = len(qrels)
-        queries_with_results = sum(1 for qid in qrels.keys() if qid in results and len(results[qid]) > 0)
-        query_coverage = (queries_with_results / total_queries) if total_queries else 0.0
+        queries_with_results = sum(
+            1 for query_id in qrels if results.get(query_id)
+        )
+        query_coverage = queries_with_results / total_queries if total_queries else 0.0
 
-        all_rel = set()
-        for qq in qrels.values():
-            all_rel |= _relevant_set(qq)
+        all_relevant_doc_ids: set[str] = set()
+        for query_qrels in qrels.values():
+            all_relevant_doc_ids |= _relevant_doc_ids(query_qrels)
 
-        retrieved = set()
-        for qid, res in results.items():
-            if qid in qrels:
-                retrieved |= set(_doc_ids(res))
+        retrieved_doc_ids: set[str] = set()
+        for query_id in qrels:
+            retrieved_doc_ids |= set(_doc_ids(results.get(query_id, [])))
 
-        doc_coverage = (len(all_rel & retrieved) / len(all_rel)) if all_rel else 0.0
-        return CoverageStats(
-            query_coverage=query_coverage,
-            document_coverage=doc_coverage,
-            total_queries=total_queries,
-            queries_with_results=queries_with_results,
-            total_relevant_docs=len(all_rel),
-            unique_retrieved_docs=len(retrieved),
+        document_coverage = (
+            len(all_relevant_doc_ids & retrieved_doc_ids) / len(all_relevant_doc_ids)
+            if all_relevant_doc_ids
+            else 0.0
         )
 
-    def compare_experiments(self, baseline: Dict[str, float], experiment: Dict[str, float]) -> Dict[str, Dict[str, float]]:
-        out = {}
-        for m, b in baseline.items():
-            if m not in experiment:
+        return CoverageStats(
+            query_coverage=query_coverage,
+            document_coverage=document_coverage,
+            total_queries=total_queries,
+            queries_with_results=queries_with_results,
+            total_relevant_docs=len(all_relevant_doc_ids),
+            unique_retrieved_docs=len(retrieved_doc_ids),
+        )
+
+    def compare_experiments(
+        self,
+        baseline: Dict[str, float],
+        experiment: Dict[str, float],
+    ) -> Dict[str, Dict[str, float | bool]]:
+        comparison: Dict[str, Dict[str, float | bool]] = {}
+
+        for metric_name, baseline_value in baseline.items():
+            if metric_name not in experiment:
                 continue
-            e = experiment[m]
-            abs_diff = e - b
-            rel_diff = (abs_diff / b * 100.0) if b != 0 else 0.0
-            out[m] = {
-                "baseline": b,
-                "experiment": e,
-                "absolute_difference": abs_diff,
-                "relative_difference_percent": rel_diff,
-                "improvement": float(abs_diff > 0),
+
+            experiment_value = experiment[metric_name]
+            absolute_difference = experiment_value - baseline_value
+            relative_difference_percent = (
+                (absolute_difference / baseline_value) * 100.0
+                if baseline_value != 0
+                else 0.0
+            )
+
+            comparison[metric_name] = {
+                "baseline": baseline_value,
+                "experiment": experiment_value,
+                "absolute_difference": absolute_difference,
+                "relative_difference_percent": relative_difference_percent,
+                "improved": absolute_difference > 0,
             }
-        return out
+
+        return comparison
 
     def calculate_statistical_significance(
         self,
@@ -174,46 +222,80 @@ class EvaluationMetrics:
             logger.warning("scipy not available, skipping significance test")
             return {"error": "scipy required for significance testing"}
 
-        per_a, per_b = [], []
-        common = set(results_a.keys()) & set(results_b.keys()) & set(qrels.keys())
+        metric_fn = self._metric_function(metric)
+        common_query_ids = sorted(set(qrels) & set(results_a) & set(results_b))
 
-        scorer = self._metric_fn(metric)
-        for qid in common:
-            ra = _doc_ids(results_a[qid])
-            rb = _doc_ids(results_b[qid])
-            per_a.append(scorer(qrels[qid], ra))
-            per_b.append(scorer(qrels[qid], rb))
+        scores_a: List[float] = []
+        scores_b: List[float] = []
 
-        if len(per_a) < 10:
-            return {"error": f"Not enough queries ({len(per_a)}) for reliable significance testing"}
+        for query_id in common_query_ids:
+            query_qrels = qrels[query_id]
+            retrieved_a = _doc_ids(results_a[query_id])
+            retrieved_b = _doc_ids(results_b[query_id])
 
-        stat, p = ttest_rel(per_a, per_b)
+            scores_a.append(metric_fn(query_qrels, retrieved_a))
+            scores_b.append(metric_fn(query_qrels, retrieved_b))
+
+        if len(scores_a) < 10:
+            return {
+                "error": f"Not enough queries ({len(scores_a)}) for reliable significance testing"
+            }
+
+        statistic, p_value = ttest_rel(scores_a, scores_b)
+
         return {
             "metric": metric,
-            "num_queries": len(per_a),
-            "mean_a": float(np.mean(per_a)),
-            "mean_b": float(np.mean(per_b)),
-            "statistic": float(stat),
-            "p_value": float(p),
-            "significant": bool(p < alpha),
+            "num_queries": len(scores_a),
+            "mean_a": float(np.mean(scores_a)),
+            "mean_b": float(np.mean(scores_b)),
+            "statistic": float(statistic),
+            "p_value": float(p_value),
+            "significant": bool(p_value < alpha),
             "alpha": alpha,
         }
 
-    def _macro(self, qrels: Qrels, results: Results, fn) -> float:
-        vals = []
-        for qid, qq in qrels.items():
-            rr = _doc_ids(results.get(qid, []))
-            vals.append(fn(qq, rr))
-        return float(np.mean(vals)) if vals else 0.0
+    def _macro_average(
+        self,
+        qrels: Qrels,
+        results: Results,
+        metric_fn: Callable[[Mapping[str, int], Sequence[str]], float],
+    ) -> float:
+        values: List[float] = []
 
-    def _metric_fn(self, metric: str):
+        for query_id, query_qrels in qrels.items():
+            retrieved_doc_ids = _doc_ids(results.get(query_id, []))
+            values.append(metric_fn(query_qrels, retrieved_doc_ids))
+
+        return float(np.mean(values)) if values else 0.0
+
+    def _metric_function(
+        self,
+        metric: str,
+    ) -> Callable[[Mapping[str, int], Sequence[str]], float]:
         if metric.startswith("ndcg@"):
-            k = int(metric.split("@")[1])
-            return lambda qq, rr: _ndcg_at_k(qq, rr, k)
+            k = int(metric.split("@", 1)[1])
+            return lambda query_qrels, retrieved: _ndcg_at_k(query_qrels, retrieved, k)
+
         if metric.startswith("precision@"):
-            k = int(metric.split("@")[1])
-            return lambda qq, rr: _precision_at_k(_relevant_set(qq), rr, k)
+            k = int(metric.split("@", 1)[1])
+            return lambda query_qrels, retrieved: _precision_at_k(
+                _relevant_doc_ids(query_qrels), retrieved, k
+            )
+
         if metric.startswith("recall@"):
-            k = int(metric.split("@")[1])
-            return lambda qq, rr: _recall_at_k(_relevant_set(qq), rr, k)
+            k = int(metric.split("@", 1)[1])
+            return lambda query_qrels, retrieved: _recall_at_k(
+                _relevant_doc_ids(query_qrels), retrieved, k
+            )
+
+        if metric == "mrr":
+            return lambda query_qrels, retrieved: _mrr(
+                _relevant_doc_ids(query_qrels), retrieved
+            )
+
+        if metric == "map":
+            return lambda query_qrels, retrieved: _average_precision(
+                _relevant_doc_ids(query_qrels), retrieved
+            )
+
         raise ValueError(f"Unsupported metric: {metric}")
