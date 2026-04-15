@@ -3,7 +3,6 @@ import numpy as np
 import voyageai
 from utils.atlas_client import AtlasVectorSearchClient
 from utils.evaluation import EvaluationMetrics
-from utils.logging_utils import ExperimentLogger
 
 def load_jsonl(path):
     with open(path) as f:
