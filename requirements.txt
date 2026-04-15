@@ -1,5 +1,5 @@
 # VoyageAI Testing Suite Dependencies
-# Core ML and Data Processing
+# ML and Data Processing
 # Core utilities
 PyYAML>=6.0
 numpy>=1.23
