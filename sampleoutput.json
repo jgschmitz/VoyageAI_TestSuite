@@ -1,7 +1,7 @@
 {
   "experiment": "experiment_3_qat_rerank",
   "metrics": {
-    "ndcg@10": 0.409,
+    "ndcg@10": 0.408,
     "recall@50": 0.772,
     "mean_latency_ms": 182.3,
     "median_latency_ms": 168.9,
