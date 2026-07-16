@@ -19,7 +19,7 @@ from pymongo import MongoClient
 import openai
 
 # ---------- Config (fill these) ----------
-MONGODB_URI    = ""
+MONGODB_URI= ""
 OPENAI_KEY = ""
 
 DB, COLL, INDEX_NAME = "NUCC", "taxonomy251", "default"   # <- your Atlas Vector Search index name
